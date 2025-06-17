@@ -28,7 +28,6 @@ packaging
 pandas
 patsy
 pillow
-pmdarima
 protobuf
 pyarrow
 pydeck
