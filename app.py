@@ -1,8 +1,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from forecast_core import load_data, train_model, forecast, auto_model, calculate_metrics, plot_acf_pacf
+import matplotlib
 import matplotlib.pyplot as plt
+from forecast_core import load_data, train_model, forecast, auto_model, calculate_metrics, plot_acf_pacf
+
+# ✅ 加入中文字型設定（適用於 Windows）
+matplotlib.rcParams['font.family'] = 'Microsoft JhengHei'
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 st.set_page_config(page_title="高雄捷運-運量預測系統", layout="wide")  # 修改標題
 st.title("高雄捷運-運量預測系統")  # 修改標題
@@ -151,7 +156,6 @@ if submitted:
         ax1.set_ylabel("總運量")
         ax1.grid(True)
 
-        # 標上數值（避免重疊）
         for x, y in zip(df_result.index, df_result['實際值']):
             if pd.notna(y):
                 ax1.text(x, y, f'{y:,.0f}', ha='center', va='bottom', fontsize=8, color='blue')
@@ -160,7 +164,6 @@ if submitted:
             if pd.notna(y):
                 ax1.text(x, y, f'{y:,.0f}', ha='center', va='top', fontsize=8, color='orange')
 
-        # 預測誤差柱狀圖及標籤
         ax2 = ax1.twinx()
         bars = ax2.bar(df_result.index, df_result['預測誤差(%)'], color='red', alpha=0.3, label='預測誤差(%)')
         ax2.set_ylabel("預測誤差 (%)")
@@ -171,7 +174,7 @@ if submitted:
             if not np.isnan(height) and height > 0:
                 ax2.text(
                     bar.get_x() + bar.get_width() / 2,
-                    height + 2,  # 往上移動2單位避免貼柱頂
+                    height + 2,
                     f'{height:.1f}%',
                     ha='center',
                     va='bottom',
