@@ -14,7 +14,8 @@ def train_model(df, train_start, train_end, order, seasonal_order, use_exog, sel
     endog = train_df['總運量']
     exog = train_df[selected_exog] if use_exog and selected_exog else None
 
-    model = SARIMAX(endog, order=order, seasonal_order=seasonal_order, exog=exog, enforce_stationarity=False, enforce_invertibility=False)
+    model = SARIMAX(endog, order=order, seasonal_order=seasonal_order, exog=exog,
+                    enforce_stationarity=False, enforce_invertibility=False)
     model_fit = model.fit(disp=False)
     return model_fit
 
@@ -133,3 +134,44 @@ def plot_acf_pacf(df, train_start, train_end, model_fit=None):
 
     plt.tight_layout()
     return fig
+
+def plot_forecast_vs_actual_with_error(actual, predicted, title="預測 vs 實際與誤差"):
+    """
+    繪製實際值與預測值的折線圖，及誤差的柱狀圖，並標註數據點。
+    """
+    error = actual - predicted
+
+    fig, ax1 = plt.subplots(figsize=(12,6))
+
+    # 折線圖：實際值與預測值
+    line_actual, = ax1.plot(actual.index, actual.values, label='實際值', color='blue', linewidth=2, marker='o')
+    line_pred, = ax1.plot(predicted.index, predicted.values, label='預測值', color='orange', linestyle='--', linewidth=2, marker='o')
+    ax1.set_ylabel('數值')
+    ax1.legend(loc='upper left')
+    ax1.grid(True)
+
+    # 在折線圖點上標註數值（實際值）
+    for x, y in zip(actual.index, actual.values):
+        ax1.text(x, y, f'{y:.0f}', fontsize=8, color='blue', ha='center', va='bottom')
+
+    # 在折線圖點上標註數值（預測值），稍微往下移避免重疊
+    for x, y in zip(predicted.index, predicted.values):
+        ax1.text(x, y, f'{y:.0f}', fontsize=8, color='orange', ha='center', va='top')
+
+    # 柱狀圖：誤差
+    ax2 = ax1.twinx()
+    bars = ax2.bar(error.index, error.values, label='誤差(實際-預測)', alpha=0.3, color='red')
+    ax2.set_ylabel('誤差')
+    ax2.legend(loc='upper right')
+
+    # 在柱子上方標註誤差數值
+    for bar in bars:
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width() / 2, height, f'{height:.0f}',
+                 fontsize=8, color='red', ha='center',
+                 va='bottom' if height >= 0 else 'top')
+
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
