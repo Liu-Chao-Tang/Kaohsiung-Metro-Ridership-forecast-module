@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -139,35 +138,30 @@ if submitted:
         df_eval = df_result.dropna(subset=['實際值'])
         if not df_eval.empty:
             with st.expander("點此展開模型績效指標"):
-                metrics = calculate_metrics(model_result, df_eval['實際值'], df_eval['預測值'])
-                st.table(metrics)
+                metrics_df = calculate_metrics(model_result, df_eval['實際值'], df_eval['預測值'])  # ← 含說明欄位
+                st.table(metrics_df)
 
-        # 繪圖: 實際值/預測值 折線圖 + 預測誤差(%) 柱狀圖 + 標註數據，避免遮蔽
+        # 圖表
         fig, ax1 = plt.subplots(figsize=(12, 6))
-
-        # 折線圖：實際值
         l1 = ax1.plot(df_result.index, df_result['實際值'], label='實際值', color='blue', marker='o')
-        # 折線圖：預測值
         l2 = ax1.plot(df_result.index, df_result['預測值'], label='預測值', color='orange', marker='s')
         ax1.fill_between(df_result.index, df_result['下限'], df_result['上限'], color='gray', alpha=0.2)
         ax1.set_ylabel("總運量")
         ax1.grid(True)
 
-        # 標註實際值與預測值數據 (避免重疊，交錯上下標註)
         for i, (x, y1, y2) in enumerate(zip(df_result.index, df_result['實際值'], df_result['預測值'])):
-            ax1.text(x, y1, f"{int(y1):,}", color='blue', fontsize=8, ha='center', va='bottom' if i%2==0 else 'top')
-            ax1.text(x, y2, f"{int(y2):,}", color='orange', fontsize=8, ha='center', va='top' if i%2==0 else 'bottom')
+            ax1.text(x, y1, f"{int(y1):,}", color='blue', fontsize=8, ha='center', va='bottom' if i % 2 == 0 else 'top')
+            ax1.text(x, y2, f"{int(y2):,}", color='orange', fontsize=8, ha='center', va='top' if i % 2 == 0 else 'bottom')
 
         ax2 = ax1.twinx()
         bars = ax2.bar(df_result.index, df_result['預測誤差(%)'], color='red', alpha=0.3, label='預測誤差(%)')
         ax2.set_ylabel("預測誤差 (%)")
         ax2.set_ylim(0, max(150, df_result['預測誤差(%)'].max() * 1.2))
 
-        # 標註柱狀圖誤差數據 (置於柱頂上方)
         for bar in bars:
             height = bar.get_height()
             if not np.isnan(height) and height > 0:
-                ax2.text(bar.get_x() + bar.get_width()/2, height + 2, f"{height:.1f}%", ha='center', va='bottom', fontsize=7, color='red')
+                ax2.text(bar.get_x() + bar.get_width() / 2, height + 2, f"{height:.1f}%", ha='center', va='bottom', fontsize=7, color='red')
 
         lines_1, labels_1 = ax1.get_legend_handles_labels()
         lines_2, labels_2 = ax2.get_legend_handles_labels()
@@ -185,5 +179,3 @@ if submitted:
 
     except Exception as e:
         st.exception(e)
-
-
