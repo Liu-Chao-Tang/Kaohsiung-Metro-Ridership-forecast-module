@@ -1,214 +1,244 @@
+# forecast_core.py
+
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.arima.model import ARIMA
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from pmdarima import auto_arima
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from statsmodels.stats.diagnostic import acorr_ljungbox
+import matplotlib.pyplot as plt
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 
-def load_data(filepath):
-    df = pd.read_excel(filepath, index_col=0, parse_dates=True)
-    return df
 
-def train_model(df, train_start, train_end, order, seasonal_order, use_exog, selected_exog, model_type, target):
-    train_df = df.loc[train_start:train_end]
-    endog = train_df[target]
-    exog = train_df[selected_exog] if use_exog and selected_exog else None
+class ForecastModel:
+    def __init__(self, df, target_col, use_exog=False, exog_cols=None):
+        """
+        初始化 ForecastModel 物件
 
-    if model_type == "AR":
-        model = AutoReg(endog, lags=order[0], old_names=False)
-        model_fit = model.fit()
-    elif model_type == "MA":
-        model = ARIMA(endog, order=(0, 0, order[2]))
-        model_fit = model.fit()
-    elif model_type == "ARIMA":
-        model = ARIMA(endog, order=order)
-        model_fit = model.fit()
-    else:
-        model = SARIMAX(endog, order=order, seasonal_order=seasonal_order, exog=exog,
-                        enforce_stationarity=False, enforce_invertibility=False)
-        model_fit = model.fit(disp=False)
+        Args:
+            df (pd.DataFrame): 時間序列資料，索引為日期
+            target_col (str): 目標預測欄位名稱
+            use_exog (bool): 是否使用外生變數
+            exog_cols (list): 外生變數欄位名稱清單
+        """
+        self.df = df
+        self.target_col = target_col
+        self.use_exog = use_exog
+        self.exog_cols = exog_cols if exog_cols else []
+        self.model_fit = None
+        self.order = None
+        self.seasonal_order = None
 
-    return model_fit
+    def load_data(self, filepath):
+        """載入資料"""
+        self.df = pd.read_excel(filepath, index_col=0, parse_dates=True)
 
-def forecast(model_fit, df, forecast_start, forecast_end, use_exog, selected_exog, model_type):
-    forecast_index = pd.date_range(start=forecast_start, end=forecast_end)
+    def auto_fit(self, train_start, train_end, m=7):
+        """
+        使用 auto_arima 自動搜尋最佳模型參數
 
-    if model_type in ["AR", "MA", "ARIMA"]:
-        pred = model_fit.get_prediction(start=forecast_index[0], end=forecast_index[-1])
-    else:
-        exog_forecast = df.loc[forecast_index, selected_exog] if use_exog and selected_exog else None
-        pred = model_fit.get_forecast(steps=len(forecast_index), exog=exog_forecast)
+        Args:
+            train_start (datetime): 訓練開始日期
+            train_end (datetime): 訓練結束日期
+            m (int): 季節性週期 (預設7天)
 
-    pred_mean = pred.predicted_mean
-    try:
-        conf_int = pred.conf_int()
-    except:
-        conf_int = pd.DataFrame({"lower": pred_mean * 0.9, "upper": pred_mean * 1.1}, index=forecast_index)
+        Returns:
+            order (tuple): (p,d,q)
+            seasonal_order (tuple): (P,D,Q,s)
+        """
+        train_df = self.df.loc[train_start:train_end]
+        endog = train_df[self.target_col]
+        exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
-    df_forecast = pd.DataFrame({
-        '預測值': pred_mean,
-        '下限': conf_int.iloc[:, 0],
-        '上限': conf_int.iloc[:, 1]
-    }, index=forecast_index)
-    return df_forecast
+        stepwise_model = auto_arima(
+            endog, exogenous=exog, seasonal=True, m=m,
+            start_p=0, max_p=3, start_q=0, max_q=3,
+            start_P=0, max_P=2, start_Q=0, max_Q=2,
+            error_action='ignore', suppress_warnings=True, stepwise=True
+        )
+        self.order = stepwise_model.order
+        self.seasonal_order = stepwise_model.seasonal_order
+        return self.order, self.seasonal_order
 
-def auto_model(df, train_start, train_end, use_exog, selected_exog, target):
-    train_df = df.loc[train_start:train_end]
-    endog = train_df[target]
-    exog = train_df[selected_exog] if use_exog and selected_exog else None
+    def fit(self, train_start, train_end, order, seasonal_order, model_type="SARIMAX"):
+        """
+        訓練模型
 
-    stepwise_model = auto_arima(
-        endog,
-        exogenous=exog,
-        start_p=0, max_p=3,
-        start_q=0, max_q=3,
-        d=None,
-        seasonal=True,
-        start_P=0, max_P=2,
-        start_Q=0, max_Q=2,
-        D=None,
-        m=7,
-        trace=False,
-        error_action='ignore',
-        suppress_warnings=True,
-        stepwise=True,
-        n_jobs=1
-    )
+        Args:
+            train_start (datetime): 訓練開始日期
+            train_end (datetime): 訓練結束日期
+            order (tuple): (p,d,q)
+            seasonal_order (tuple): (P,D,Q,s)
+            model_type (str): 模型類型 ('AR', 'MA', 'ARIMA', 'SARIMAX')
 
-    return stepwise_model.order, stepwise_model.seasonal_order
+        Returns:
+            model_fit: 訓練好的模型物件
+        """
+        train_df = self.df.loc[train_start:train_end]
+        endog = train_df[self.target_col]
+        exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
-def summarize_model_quality(metrics_df):
-    flags = metrics_df['結果'].astype(str).values
-    fail_flags = [f for f in flags if '❌' in f or '⚠' in f]
-    if not fail_flags:
-        return "✅ 模型表現良好，可直接應用於實務預測。"
+        self.order = order
+        self.seasonal_order = seasonal_order
 
-    suggestions = []
-    if '❌' in metrics_df.loc['R-squared', '結果']:
-        suggestions.append("R平方過低，建議增加訓練資料量或加入其他外生變數。")
-    if '❌' in metrics_df.loc['Adjusted R-squared', '結果']:
-        suggestions.append("調整後R平方過低，模型可能過於簡單或資料不足。")
-    if '❌' in metrics_df.loc['MAPE (%)', '結果']:
-        suggestions.append("MAPE過高，建議考慮目標變數轉換或加入更多外部影響因素。")
-    if '❌' in metrics_df.loc['Ljung-Box p-value', '結果']:
-        suggestions.append("殘差自相關明顯，建議提高模型的AR或季節性階數。")
+        if model_type == "AR":
+            model = AutoReg(endog, lags=order[0], old_names=False)
+            self.model_fit = model.fit()
+        elif model_type == "MA":
+            model = ARIMA(endog, order=(0, 0, order[2]))
+            self.model_fit = model.fit()
+        elif model_type == "ARIMA":
+            model = ARIMA(endog, order=order)
+            self.model_fit = model.fit()
+        else:  # SARIMAX
+            model = SARIMAX(endog, order=order, seasonal_order=seasonal_order,
+                            exog=exog, enforce_stationarity=False, enforce_invertibility=False)
+            self.model_fit = model.fit(disp=False)
+        return self.model_fit
 
-    if '⚠' in flags:
-        suggestions.append("部分指標為普通，模型表現尚可，但仍建議密切監控預測誤差。")
+    def forecast(self, forecast_start, forecast_end):
+        """
+        進行未來期間預測，並產生動態信賴區間
 
-    summary = "❌ 模型存在以下問題：\n" + "\n".join(f"- {s}" for s in suggestions)
-    return summary
+        Args:
+            forecast_start (datetime): 預測起始日期
+            forecast_end (datetime): 預測結束日期
 
-def calculate_metrics(model_fit, actual, predicted):
-    residuals = actual - predicted
-    rmse = np.sqrt(mean_squared_error(actual, predicted))
-    mae = mean_absolute_error(actual, predicted)
-    mape = np.mean(np.abs(residuals / actual)) * 100
-    max_ae = np.max(np.abs(residuals))
-    r2 = r2_score(actual, predicted)
-    n = len(actual)
-    p = len(model_fit.params) if hasattr(model_fit, 'params') else 1
-    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n - p - 1 > 0 else np.nan
-    stabilized_r2 = 1 - (np.var(residuals) / np.var(actual)) if np.var(actual) != 0 else np.nan
+        Returns:
+            pd.DataFrame: 包含預測值、下限、上限的資料表，index為日期
+        """
+        if self.model_fit is None:
+            raise ValueError("模型尚未訓練完成")
 
-    bic = getattr(model_fit, 'bic', np.nan)
-    aic = getattr(model_fit, 'aic', np.nan)
-    normalized_bic = bic / n if not np.isnan(bic) else np.nan
+        full_index = pd.date_range(forecast_start, forecast_end)
+        valid_index = full_index.intersection(self.df.index)
 
-    try:
-        from statsmodels.stats.diagnostic import acorr_ljungbox
-        lb_test = acorr_ljungbox(model_fit.resid, lags=[10], return_df=True)
-        ljung_box_q = lb_test['lb_stat'].values[0]
-        ljung_box_p = lb_test['lb_pvalue'].values[0]
-    except:
-        ljung_box_q = np.nan
-        ljung_box_p = np.nan
+        if isinstance(self.model_fit, (AutoReg, ARIMA)):
+            pred = self.model_fit.get_prediction(start=valid_index[0], end=valid_index[-1])
+        else:
+            exog_forecast = self.df.loc[valid_index, self.exog_cols] if self.use_exog and self.exog_cols else None
+            pred = self.model_fit.get_forecast(steps=len(valid_index), exog=exog_forecast)
 
-    metric_desc = {
-        'R-squared': '判斷模型解釋變異能力，越接近1越好',
-        'Adjusted R-squared': '調整後的R方，考慮變數數量，越高越好',
-        'Stabilized R-squared': '平穩化R²衡量殘差穩定程度，越高越佳',
-        'MAPE (%)': '平均絕對百分比誤差，數值越低越佳',
-        'RMSE': '均方根誤差，越低越好',
-        'MAE': '平均絕對誤差，越低越好',
-        'Max AE': '最大絕對誤差，越低越好',
-        'Normalized BIC': '貝氏資訊準則，數值越低模型越佳',
-        'AIC': '赤池資訊準則，數值越低模型越佳',
-        'Ljung-Box Q': '殘差自相關統計量',
-        'Ljung-Box p-value': '殘差自相關檢定p值'
-    }
+        pred_mean = pred.predicted_mean
 
-    metrics = {
-        'R-squared': f"{r2:.4f}",
-        'Adjusted R-squared': f"{adj_r2:.4f}" if not np.isnan(adj_r2) else 'N/A',
-        'Stabilized R-squared': f"{stabilized_r2:.4f}" if not np.isnan(stabilized_r2) else 'N/A',
-        'MAPE (%)': f"{mape:.2f}",
-        'RMSE': f"{rmse:.2f}",
-        'MAE': f"{mae:.2f}",
-        'Max AE': f"{max_ae:.2f}",
-        'Normalized BIC': f"{normalized_bic:.4f}" if not np.isnan(normalized_bic) else 'N/A',
-        'AIC': f"{aic:.4f}" if not np.isnan(aic) else 'N/A',
-        'Ljung-Box Q': f"{ljung_box_q:.4f}" if not np.isnan(ljung_box_q) else 'N/A',
-        'Ljung-Box p-value': f"{ljung_box_p:.4f}" if not np.isnan(ljung_box_p) else 'N/A'
-    }
-
-    standards_text = {
-        'MAPE (%)': "<5%：佳，<10%：可接受，<20%：普通，>20%：差",
-        'R-squared': "建議 ≥0.5",
-        'Adjusted R-squared': "建議 ≥0.5",
-        'Stabilized R-squared': "建議 ≥0.5",
-        'Ljung-Box p-value': "建議 >0.05，殘差無自相關"
-    }
-
-    annotated_metrics = {}
-    for k, v in metrics.items():
-        std = standards_text.get(k, "-")
-        flag = ''
+        # 嘗試取得模型信賴區間，若無則用殘差標準差動態估計
         try:
-            val_float = float(v.replace('%', '')) if '%' in v else float(v)
-            if k == 'MAPE (%)':
-                if val_float < 5:
-                    flag = "✅佳"
-                elif val_float < 10:
-                    flag = "✅可接受"
-                elif val_float < 20:
-                    flag = "⚠普通"
-                else:
-                    flag = "❌差"
-            elif k in ['R-squared', 'Adjusted R-squared', 'Stabilized R-squared']:
-                flag = "✅" if val_float >= 0.5 else "❌"
-            elif k == 'Ljung-Box p-value':
-                flag = "✅" if val_float > 0.05 else "❌"
-        except:
-            flag = "N/A"
+            conf_int = pred.conf_int()
+        except Exception:
+            resid_std = np.std(self.model_fit.resid.dropna()) if hasattr(self.model_fit, 'resid') else np.std(pred_mean) * 0.1
+            margin = 1.96 * resid_std
+            lower = pred_mean - margin
+            upper = pred_mean + margin
+            conf_int = pd.DataFrame({'lower': lower, 'upper': upper}, index=valid_index)
 
-        annotated_metrics[k] = {
-            "值": v,
-            "建議標準": std,
-            "結果": flag,
-            "說明": metric_desc.get(k, "")
+        df_forecast = pd.DataFrame({
+            '預測值': pred_mean,
+            '下限': conf_int.iloc[:, 0],
+            '上限': conf_int.iloc[:, 1]
+        }, index=valid_index)
+
+        return df_forecast
+
+    def calculate_metrics(self, actual, predicted):
+        """
+        計算模型績效指標
+
+        Args:
+            actual (pd.Series): 實際值
+            predicted (pd.Series): 預測值
+
+        Returns:
+            dict: 指標字典
+        """
+        residuals = actual - predicted
+        rmse = np.sqrt(mean_squared_error(actual, predicted))
+        mae = mean_absolute_error(actual, predicted)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mape = np.mean(np.abs(residuals / actual.replace(0, np.nan))) * 100
+        max_ae = np.max(np.abs(residuals))
+        r2 = r2_score(actual, predicted)
+        n = len(actual)
+        p = len(self.model_fit.params) if hasattr(self.model_fit, 'params') else 1
+        adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n - p - 1 > 0 else np.nan
+        stabilized_r2 = 1 - (np.var(residuals) / np.var(actual)) if np.var(actual) != 0 else np.nan
+
+        bic = getattr(self.model_fit, 'bic', np.nan)
+        aic = getattr(self.model_fit, 'aic', np.nan)
+        normalized_bic = bic / n if not np.isnan(bic) else np.nan
+
+        try:
+            lb_test = acorr_ljungbox(self.model_fit.resid.dropna(), lags=[10], return_df=True)
+            ljung_box_p = lb_test['lb_pvalue'].values[0]
+        except Exception:
+            ljung_box_p = np.nan
+
+        metrics = {
+            'R-squared': r2,
+            'Adjusted R-squared': adj_r2,
+            'Stabilized R-squared': stabilized_r2,
+            'MAPE (%)': mape,
+            'RMSE': rmse,
+            'MAE': mae,
+            'Max AE': max_ae,
+            'Normalized BIC': normalized_bic,
+            'AIC': aic,
+            'Ljung-Box p-value': ljung_box_p
         }
+        return metrics
 
-    return pd.DataFrame(annotated_metrics).T
+    def plot_acf_pacf(self, train_start, train_end):
+        """
+        繪製訓練期間資料及殘差的 ACF / PACF 圖
 
-def plot_acf_pacf(df, train_start, train_end, model_fit=None):
-    from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    train_df = df.loc[train_start:train_end]
-    series = train_df.select_dtypes(include=[np.number]).iloc[:, 0]
-    plot_acf(series.dropna(), ax=axes[0, 0], lags=30)
-    axes[0, 0].set_title('原始資料 ACF')
-    plot_pacf(series.dropna(), ax=axes[0, 1], lags=30)
-    axes[0, 1].set_title('原始資料 PACF')
-    if model_fit:
-        resid = model_fit.resid.dropna()
-        plot_acf(resid, ax=axes[1, 0], lags=30)
-        axes[1, 0].set_title('模型殘差 ACF')
-        plot_pacf(resid, ax=axes[1, 1], lags=30)
-        axes[1, 1].set_title('模型殘差 PACF')
-    plt.tight_layout()
-    return fig
+        Args:
+            train_start (datetime): 訓練起始日
+            train_end (datetime): 訓練結束日
 
+        Returns:
+            matplotlib.figure.Figure: 繪圖物件
+        """
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        train_df = self.df.loc[train_start:train_end]
+        series = train_df[self.target_col].dropna()
+        plot_acf(series, ax=axes[0, 0], lags=30)
+        axes[0, 0].set_title('原始資料 ACF')
+        plot_pacf(series, ax=axes[0, 1], lags=30)
+        axes[0, 1].set_title('原始資料 PACF')
+        if self.model_fit is not None:
+            try:
+                resid = self.model_fit.resid.dropna()
+                plot_acf(resid, ax=axes[1, 0], lags=30)
+                axes[1, 0].set_title('模型殘差 ACF')
+                plot_pacf(resid, ax=axes[1, 1], lags=30)
+                axes[1, 1].set_title('模型殘差 PACF')
+            except Exception:
+                axes[1, 0].set_visible(False)
+                axes[1, 1].set_visible(False)
+        plt.tight_layout()
+        return fig
 
+    @staticmethod
+    def summarize_quality(metrics_dict):
+        """
+        根據指標簡單給出模型品質摘要
+
+        Args:
+            metrics_dict (dict): 模型績效指標字典
+
+        Returns:
+            str: 模型品質摘要訊息
+        """
+        summary = []
+        if metrics_dict.get('R-squared', 0) < 0.5:
+            summary.append("R平方過低，建議增加訓練資料量或加入其他外生變數。")
+        if metrics_dict.get('MAPE (%)', 100) > 20:
+            summary.append("MAPE過高，建議考慮目標變數轉換或加入更多外部影響因素。")
+        if metrics_dict.get('Ljung-Box p-value', 0) <= 0.05:
+            summary.append("殘差自相關明顯，建議提高模型的AR或季節性階數。")
+
+        if not summary:
+            return "✅ 模型表現良好，可直接應用於實務預測。"
+        else:
+            return "❌ 模型存在以下問題：\n" + "\n".join(f"- {s}" for s in summary)

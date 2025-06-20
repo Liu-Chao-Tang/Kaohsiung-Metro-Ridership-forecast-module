@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-from forecast_core import load_data, train_model, forecast, auto_model, calculate_metrics, plot_acf_pacf, summarize_model_quality
+from forecast_core import ForecastModel
 from io import BytesIO
 
 matplotlib.rcParams['font.family'] = 'Microsoft JhengHei'
@@ -14,7 +14,8 @@ st.markdown("<h1 style='text-align: center;'>高雄捷運-運量預測系統</h1
 
 @st.cache_data
 def cached_load():
-    return load_data("data/daily_volume.xlsx")
+    df = pd.read_excel("data/daily_volume.xlsx", index_col=0, parse_dates=True)
+    return df
 
 df = cached_load()
 
@@ -26,7 +27,7 @@ sorted_columns = volume_cols + other_cols
 default_target = '總運量' if '總運量' in sorted_columns else sorted_columns[0]
 
 st.header("1. 預測項目選擇")
-target_col = st.selectbox("請選擇要預測的欄位：", sorted_columns, index=sorted_columns.index(default_target))
+target_col = st.selectbox("預測項目：", sorted_columns, index=sorted_columns.index(default_target))
 exog_options = [col for col in df.columns if col != target_col]
 
 last_actual_date = df[target_col].replace(0, np.nan).dropna().index.max()
@@ -68,8 +69,8 @@ if mode == "自訂模式":
 else:
     p = d = q = P = D = Q = S = None
 
-st.header("3. 影響因子(外生變數)選擇")
-use_exog = st.radio("", ("否(僅以運量歷史資料進行預測)", "是(考量其他影響因素)")) == "是(考量其他影響因素)"
+st.header("3. 影響因子選擇(外生變數)")
+use_exog = st.radio("", ("否(僅以歷史運量資料進行預測)", "是(考量其他影響因素)")) == "是(考量其他影響因素)"
 selected_exog = []
 if use_exog:
     st.markdown("請勾選要使用的外生變數：")
@@ -82,41 +83,10 @@ st.header("4. 現有運量資料範圍")
 st.markdown(f"資料日期範圍：**{min_date.date()}** 至 **{max_date.date()}**")
 
 with st.form("forecast_form"):
-    st.header("5. 模式訓練資料範圍設定")
-
-    st.markdown("開始日期")
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        start_year = st.selectbox("年", list(range(min_date.year, max_date.year + 1)), index=list(range(min_date.year, max_date.year + 1)).index(min_date.year), key="start_year")
-    with col2:
-        start_month = st.selectbox("月", list(range(1,13)), index=min_date.month-1, key="start_month")
-    with col3:
-        start_day = st.selectbox("日", list(range(1,32)), index=min_date.day-1, key="start_day")
-
-    st.markdown("結束日期")
-    col4, col5, col6 = st.columns([2, 1, 1])
-    with col4:
-        end_year = st.selectbox("年", list(range(min_date.year, max_date.year + 1)), index=list(range(min_date.year, max_date.year + 1)).index(max_date.year), key="end_year")
-    with col5:
-        end_month = st.selectbox("月", list(range(1,13)), index=max_date.month-1, key="end_month")
-    with col6:
-        end_day = st.selectbox("日", list(range(1,32)), index=max_date.day-1, key="end_day")
-
-    # 組合日期
-    try:
-        train_start = pd.to_datetime(f"{start_year}-{start_month}-{start_day}")
-    except:
-        st.error("開始日期無效，請重新選擇")
-        train_start = min_date
-
-    try:
-        train_end = pd.to_datetime(f"{end_year}-{end_month}-{end_day}")
-    except:
-        st.error("結束日期無效，請重新選擇")
-        train_end = max_date
-
+    st.header("5. 模式訓練與預測期間設定")
+    train_start = st.date_input("訓練開始日", min_value=min_date.date(), max_value=max_date.date(), value=min_date.date())
+    train_end = st.date_input("訓練結束日", min_value=min_date.date(), max_value=max_date.date(), value=max_date.date())
     n_forecast_days = st.slider("預測天數", min_value=1, max_value=365, value=7)
-
     submitted = st.form_submit_button("執行預測")
 
 if submitted:
@@ -133,8 +103,11 @@ if submitted:
 
         progress = st.progress(0, text="建立模型中...")
 
+        # 建立 ForecastModel 物件
+        fm = ForecastModel(df, target_col, use_exog, selected_exog)
+
         if mode == "專家模式（自動選擇最優模型運算）":
-            order, seasonal_order = auto_model(df, train_start_dt, train_end_dt, use_exog, selected_exog, target_col)
+            order, seasonal_order = fm.auto_fit(train_start_dt, train_end_dt, m=7)
             st.success(f"自動模型參數：order={order}, seasonal_order={seasonal_order}")
             model_type = "SARIMAX"
         else:
@@ -142,12 +115,16 @@ if submitted:
             seasonal_order = (P, D, Q, S)
 
         progress.progress(30, text="訓練模型中...")
-        model_result = train_model(df, train_start_dt, train_end_dt, order, seasonal_order,
-                                   use_exog, selected_exog, model_type, target_col)
+
+        try:
+            model_result = fm.fit(train_start_dt, train_end_dt, order, seasonal_order, model_type)
+        except Exception as e:
+            st.error("❌ 模型訓練失敗，請檢查參數或資料格式")
+            st.stop()
 
         progress.progress(60, text="預測中...")
-        df_forecast = forecast(model_result, df, forecast_start_dt, forecast_end_dt,
-                               use_exog, selected_exog, model_type)
+
+        df_forecast = fm.forecast(forecast_start_dt, forecast_end_dt)
 
         actuals = df[target_col].reindex(df_forecast.index)
         df_result = df_forecast.copy()
@@ -190,10 +167,91 @@ if submitted:
         df_eval = df_result.dropna(subset=['實際值'])
         if not df_eval.empty:
             with st.expander("顯示模型績效指標總表"):
-                metrics_df = calculate_metrics(model_result, df_eval['實際值'], df_eval['預測值'])
-                st.dataframe(metrics_df.style.applymap(lambda v: 'color: red' if isinstance(v, str) and '❌' in v else ''))
+                metrics = fm.calculate_metrics(df_eval['實際值'], df_eval['預測值'])
 
-                summary_text = summarize_model_quality(metrics_df)
+                # 指標清單與判斷標準、說明
+                metrics_info = {
+                    'MAPE (%)': {
+                        '標準': '<=10%',
+                        '說明': '平均絕對百分比誤差，衡量預測誤差相對於實際值的百分比。',
+                        '判斷': lambda v: '好' if v <= 10 else ('普通' if v <= 20 else '差')
+                    },
+                    'R-squared': {
+                        '標準': '>=0.8',
+                        '說明': '模型解釋變異的比例，越高代表模型越好。',
+                        '判斷': lambda v: '好' if v >= 0.8 else ('普通' if v >= 0.6 else '差')
+                    },
+                    'Adjusted R-squared': {
+                        '標準': '>=0.8',
+                        '說明': '調整參數數量後的R平方，避免過度擬合。',
+                        '判斷': lambda v: '好' if v >= 0.8 else ('普通' if v >= 0.6 else '差')
+                    },
+                    'Stabilized R-squared': {
+                        '標準': '>=0.8',
+                        '說明': '在差分後資料上的模型解釋能力。',
+                        '判斷': lambda v: '好' if v >= 0.8 else ('普通' if v >= 0.6 else '差')
+                    },
+                    'RMSE': {
+                        '標準': '越低越好',
+                        '說明': '均方根誤差，反映預測誤差大小。',
+                        '判斷': lambda v: '好' if v < 10 else ('普通' if v < 20 else '差')
+                    },
+                    'MAE': {
+                        '標準': '越低越好',
+                        '說明': '平均絕對誤差，衡量預測值與實際值誤差的平均值。',
+                        '判斷': lambda v: '好' if v < 10 else ('普通' if v < 20 else '差')
+                    },
+                    'Max AE': {
+                        '標準': '越低越好',
+                        '說明': '最大絕對誤差，代表最大偏差值。',
+                        '判斷': lambda v: '好' if v < 20 else ('普通' if v < 40 else '差')
+                    },
+                    'Normalized BIC': {
+                        '標準': '越低越好',
+                        '說明': '貝氏資訊準則，考慮模型擬合度及複雜度。',
+                        '判斷': lambda v: '好' if v < 10 else ('普通' if v < 20 else '差')
+                    },
+                    'AIC': {
+                        '標準': '越低越好',
+                        '說明': '赤池資訊量準則，衡量模型優劣。',
+                        '判斷': lambda v: '好' if v < 10 else ('普通' if v < 20 else '差')
+                    },
+                    'Ljung-Box p-value': {
+                        '標準': '>0.05為佳',
+                        '說明': '檢驗殘差是否為白噪音。',
+                        '判斷': lambda v: '好' if v > 0.05 else '差'
+                    }
+                }
+
+                rows = []
+                priority_order = ['MAPE (%)', 'R-squared', 'Adjusted R-squared', 'Stabilized R-squared',
+                                  'RMSE', 'MAE', 'Max AE', 'Normalized BIC', 'AIC', 'Ljung-Box p-value']
+
+                for key in priority_order:
+                    val = metrics.get(key, np.nan)
+                    std = metrics_info[key]['標準']
+                    desc = metrics_info[key]['說明']
+
+                    if isinstance(val, (int, float, np.float64, np.float32)) and not np.isnan(val):
+                        judge = metrics_info[key]['判斷'](val)
+                        val_str = f"{val:.4f}"
+                    else:
+                        judge = '-'
+                        val_str = str(val)
+
+                    rows.append([key, val_str, std, desc, judge])
+
+                df_metrics = pd.DataFrame(rows, columns=['指標', '模型實際值', '判斷標準', '指標說明', '判別結果'])
+
+                st.dataframe(
+                    df_metrics.style.applymap(
+                        lambda v: 'color: red' if v == '差' else ('color: orange' if v == '普通' else 'color: green'),
+                        subset=['判別結果']
+                    ),
+                    use_container_width=True
+                )
+
+                summary_text = fm.summarize_quality(metrics)
                 if "❌" in summary_text:
                     st.error(summary_text)
                 else:
@@ -206,6 +264,10 @@ if submitted:
             ax1.plot(df_result.index, df_result['實際值'], label='實際值', color='blue', marker='o')
             ax1.plot(df_result.index, df_result['預測值'], label='預測值', color='orange', marker='s')
             ax1.fill_between(df_result.index, df_result['下限'], df_result['上限'], color='gray', alpha=0.2)
+
+            max_err = df_result['預測誤差(%)'].max()
+            if pd.isna(max_err) or np.isinf(max_err):
+                max_err = 10  # 預設合理值避免錯誤
 
             ax2.bar(df_result.index, df_result['預測誤差(%)'], alpha=0.3, color='red', label='預測誤差(%)')
             ax2.set_ylim(0, 150)
@@ -230,41 +292,27 @@ if submitted:
             st.pyplot(fig)
 
         if not df_eval.empty:
-            with st.expander("顯示模型 ACF / PACF 圖"):
-                fig_acf_pacf = plot_acf_pacf(df, train_start_dt, train_end_dt, model_result)
+            with st.expander("顯示模型 ACF / PACF 圖表"):
+                fig_acf_pacf = fm.plot_acf_pacf(train_start_dt, train_end_dt)
                 st.pyplot(fig_acf_pacf)
+                st.markdown("📄 **模型統計摘要：**")
+                st.text(model_result.summary())
 
-                
-        with st.expander("📘 模型與指標名稱名詞解釋（英文 / 中文 / 定義說明）"):
+        with st.expander("📘 附錄-模型名詞解釋（英文 / 中文 / 定義說明）"):
             glossary_df = pd.DataFrame([
-        ["AR,Autoregressive", "自迴歸模型", "Autoregressive Model: 利用自身過去的數據值來預測未來值。"],
-        ["MA,Moving Average", "移動平均模型", "Moving Average Model: 利用過去誤差項的線性組合來預測。"],
-        ["ARIMA,Autoregressive Integrated Moving Average", "整合移動平均自迴歸模型", "Autoregressive Integrated Moving Average Model: 包含差分處理以讓資料平穩的模型。"],
-        ["SARIMAX,Seasonal Autoregressive Integrated Moving Average with eXogenous regressors", "季節性整合移動平均自迴歸模型", "Seasonal Autoregressive Integrated Moving Average with eXogenous regressors: 支援季節性與外生變數的 ARIMA 模型。"],
-        ["Stationary R-squared", "平穩 R 平方", "在差分後資料上的模型解釋能力。越高越好。"],
-        ["R-squared", "R 平方", "原始資料模型解釋能力。越高越好。"],
-        ["RMSE,Root Mean Square Error", "均方根誤差", "衡量預測值與實際值平均誤差大小，單位與資料相同。越小越好。"],
-        ["MAPE,Mean Absolute Percentage Error", "平均絕對百分比誤差", "百分比誤差衡量方式，越小越好。"],
-        ["MAE,Mean Absolute Error", "平均絕對誤差", "平均預測絕對誤差。越小越好。"],
-        ["Max AE,Maximum Absolute Error", "最大絕對誤差", "所有預測中最極端誤差。"],
-        ["Normalized BIC,Bayesian Information Criterion", "正規化貝氏資訊準則", "懲罰模型複雜度後的擬合指標。越小越好。"],
-        ["AIC,Akaike Information Criterion", "赤池資訊量準則", "衡量模型擬合度與複雜度的指標，數值越小模型越佳，避免過度擬合。"],
-        ["Ljung-Box Q", "Ljung-Box Q 統計量", "檢驗殘差是否為白噪音。"],
-        ["Degrees of Freedom", "自由度", "與 Q 統計檢定中使用的滯後階數有關。"],
-        ["p-value", "顯著性", ">0.05 代表殘差無自相關（✅），≤0.05 有自相關（⚠️）"],
-        ["p", "自我回歸階數 (AR)", "代表前幾期資料對當前值的解釋力。"],
-        ["d", "差分階數 (I)", "資料差分次數，讓資料轉為平穩。"],
-        ["q", "移動平均階數 (MA)", "使用前幾期誤差解釋目前值。"],
-        ["P", "季節性 AR", "季節性資料中的 AR 階數。"],
-        ["D", "季節性差分階數", "針對季節性趨勢所需的差分次數。"],
-        ["Q", "季節性 MA", "季節性資料中的 MA 階數。"],
-        ["S", "季節性週期", "季節性週期長度（如 7 日、12 月等）。"],
-        ["ACF,Autocorrelation Function", "自相關函數", "度量目前值與過去值的線性關聯。"],
-        ["PACF,Partial Autocorrelation Function", "偏自相關函數", "在控制其他滯後變數下，某滯後值的純粹貢獻。"]
-            ], columns=["英文名稱", "中文名稱", "定義與說明"])
+                ["AR,Autoregressive", "自迴歸模型", "Autoregressive Model: 利用自身過去的數據值來預測未來值。"],
+                ["MA,Moving Average", "移動平均模型", "Moving Average Model: 利用過去誤差項的線性組合來預測。"],
+                ["ARIMA,Autoregressive Integrated Moving Average", "整合移動平均自迴歸模型", "Autoregressive Integrated Moving Average Model: 包含差分處理以讓資料平穩的模型。"],
+                ["SARIMAX,Seasonal Autoregressive Integrated Moving Average with eXogenous regressors", "季節性整合移動平均自迴歸模型", "Seasonal ARIMA with exogenous regressors: 支援季節性與外生變數的模型。"],
+                ["Stationary R-squared", "平穩 R 平方", "在差分後資料上的模型解釋能力。越高越好。"],
+                ["R-squared", "R 平方", "原始資料模型解釋能力。越高越好。"],
+                ["RMSE,Root Mean Square Error", "均方根誤差", "反映預測誤差大小，越小越好。"],
+                ["MAE,Mean Absolute Error", "平均絕對誤差", "衡量預測值與實際值誤差的平均值，越小越好。"],
+                ["BIC,Bayesian Information Criterion", "貝氏資訊準則", "考慮模型擬合度及複雜度，越低越好。"],
+                ["AIC,Akaike Information Criterion", "赤池資訊量準則", "衡量模型優劣，越低越好。"],
+                ["Ljung-Box Test", "Ljung-Box 檢定", "檢驗殘差是否為白噪音。p-value 越大越好。"]
+            ], columns=["英文", "中文", "定義說明"])
             st.dataframe(glossary_df, use_container_width=True)
-            
-        progress.progress(100, text="完成！")
 
     except Exception as e:
-        st.exception(e)
+        st.error(f"執行過程發生錯誤：{e}")
