@@ -1,5 +1,3 @@
-# forecast_core.py
-
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -14,15 +12,6 @@ from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 
 class ForecastModel:
     def __init__(self, df, target_col, use_exog=False, exog_cols=None):
-        """
-        初始化 ForecastModel 物件
-
-        Args:
-            df (pd.DataFrame): 時間序列資料，索引為日期
-            target_col (str): 目標預測欄位名稱
-            use_exog (bool): 是否使用外生變數
-            exog_cols (list): 外生變數欄位名稱清單
-        """
         self.df = df
         self.target_col = target_col
         self.use_exog = use_exog
@@ -30,30 +19,22 @@ class ForecastModel:
         self.model_fit = None
         self.order = None
         self.seasonal_order = None
+        self.model_type = None
+        self.train_start_date = None
+        self.train_end_date = None
 
     def load_data(self, filepath):
-        """載入資料"""
         self.df = pd.read_excel(filepath, index_col=0, parse_dates=True)
 
-    def auto_fit(self, train_start, train_end, m=7):
-        """
-        使用 auto_arima 自動搜尋最佳模型參數
-
-        Args:
-            train_start (datetime): 訓練開始日期
-            train_end (datetime): 訓練結束日期
-            m (int): 季節性週期 (預設7天)
-
-        Returns:
-            order (tuple): (p,d,q)
-            seasonal_order (tuple): (P,D,Q,s)
-        """
+    def auto_fit(self, train_start, train_end, m=7, expert_mode=False):
         train_df = self.df.loc[train_start:train_end]
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
+        seasonal = expert_mode or (m != 0)
+
         stepwise_model = auto_arima(
-            endog, exogenous=exog, seasonal=True, m=m,
+            endog, exogenous=exog, seasonal=seasonal, m=m,
             start_p=0, max_p=3, start_q=0, max_q=3,
             start_P=0, max_P=2, start_Q=0, max_Q=2,
             error_action='ignore', suppress_warnings=True, stepwise=True
@@ -63,25 +44,16 @@ class ForecastModel:
         return self.order, self.seasonal_order
 
     def fit(self, train_start, train_end, order, seasonal_order, model_type="SARIMAX"):
-        """
-        訓練模型
+        self.train_start_date = train_start
+        self.train_end_date = train_end
 
-        Args:
-            train_start (datetime): 訓練開始日期
-            train_end (datetime): 訓練結束日期
-            order (tuple): (p,d,q)
-            seasonal_order (tuple): (P,D,Q,s)
-            model_type (str): 模型類型 ('AR', 'MA', 'ARIMA', 'SARIMAX')
-
-        Returns:
-            model_fit: 訓練好的模型物件
-        """
         train_df = self.df.loc[train_start:train_end]
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
         self.order = order
         self.seasonal_order = seasonal_order
+        self.model_type = model_type
 
         if model_type == "AR":
             model = AutoReg(endog, lags=order[0], old_names=False)
@@ -99,59 +71,64 @@ class ForecastModel:
         return self.model_fit
 
     def forecast(self, forecast_start, forecast_end):
-        """
-        進行未來期間預測，並產生動態信賴區間
-
-        Args:
-            forecast_start (datetime): 預測起始日期
-            forecast_end (datetime): 預測結束日期
-
-        Returns:
-            pd.DataFrame: 包含預測值、下限、上限的資料表，index為日期
-        """
         if self.model_fit is None:
             raise ValueError("模型尚未訓練完成")
 
         full_index = pd.date_range(forecast_start, forecast_end)
-        valid_index = full_index.intersection(self.df.index)
+        steps = len(full_index)
 
-        if isinstance(self.model_fit, (AutoReg, ARIMA)):
-            pred = self.model_fit.get_prediction(start=valid_index[0], end=valid_index[-1])
-        else:
-            exog_forecast = self.df.loc[valid_index, self.exog_cols] if self.use_exog and self.exog_cols else None
-            pred = self.model_fit.get_forecast(steps=len(valid_index), exog=exog_forecast)
+        exog_forecast = None
+        if self.use_exog and self.exog_cols:
+            exog_forecast = self.df[self.exog_cols].reindex(full_index)
 
-        pred_mean = pred.predicted_mean
+        if self.model_type == "AR":
+            start = len(self.model_fit.model.endog)
+            end = start + steps - 1
+            pred_mean = self.model_fit.predict(start=start, end=end)
+            pred_mean.index = full_index
+            resid_std = np.std(self.model_fit.resid)
+            lower = pred_mean - 1.96 * resid_std
+            upper = pred_mean + 1.96 * resid_std
 
-        # 嘗試取得模型信賴區間，若無則用殘差標準差動態估計
-        try:
-            conf_int = pred.conf_int()
-        except Exception:
-            resid_std = np.std(self.model_fit.resid.dropna()) if hasattr(self.model_fit, 'resid') else np.std(pred_mean) * 0.1
-            margin = 1.96 * resid_std
-            lower = pred_mean - margin
-            upper = pred_mean + margin
-            conf_int = pd.DataFrame({'lower': lower, 'upper': upper}, index=valid_index)
+        elif self.model_type in ["MA", "ARIMA"]:
+            pred = self.model_fit.get_forecast(steps=steps)
+            pred_mean = pred.predicted_mean
+            try:
+                conf_int = pred.conf_int()
+                lower = conf_int.iloc[:, 0]
+                upper = conf_int.iloc[:, 1]
+            except Exception:
+                resid_std = np.std(self.model_fit.resid.dropna())
+                lower = pred_mean - 1.96 * resid_std
+                upper = pred_mean + 1.96 * resid_std
+            pred_mean.index = full_index
+            lower.index = full_index
+            upper.index = full_index
+
+        else:  # SARIMAX
+            pred = self.model_fit.get_forecast(steps=steps, exog=exog_forecast)
+            pred_mean = pred.predicted_mean
+            try:
+                conf_int = pred.conf_int()
+                lower = conf_int.iloc[:, 0]
+                upper = conf_int.iloc[:, 1]
+            except Exception:
+                resid_std = np.std(self.model_fit.resid.dropna())
+                lower = pred_mean - 1.96 * resid_std
+                upper = pred_mean + 1.96 * resid_std
+            pred_mean.index = full_index
+            lower.index = full_index
+            upper.index = full_index
 
         df_forecast = pd.DataFrame({
             '預測值': pred_mean,
-            '下限': conf_int.iloc[:, 0],
-            '上限': conf_int.iloc[:, 1]
-        }, index=valid_index)
+            '下限': lower,
+            '上限': upper
+        }, index=full_index)
 
         return df_forecast
 
     def calculate_metrics(self, actual, predicted):
-        """
-        計算模型績效指標
-
-        Args:
-            actual (pd.Series): 實際值
-            predicted (pd.Series): 預測值
-
-        Returns:
-            dict: 指標字典
-        """
         residuals = actual - predicted
         rmse = np.sqrt(mean_squared_error(actual, predicted))
         mae = mean_absolute_error(actual, predicted)
@@ -174,31 +151,42 @@ class ForecastModel:
         except Exception:
             ljung_box_p = np.nan
 
+        def quality_label(value, threshold, lower_is_better=True):
+            if np.isnan(value):
+                return "無法判斷"
+            if lower_is_better:
+                return "良好" if value <= threshold else "差"
+            else:
+                return "良好" if value >= threshold else "差"
+
+        mean_actual = np.mean(actual)
+        rmse_label = quality_label(rmse, threshold=0.2 * mean_actual)
+        mae_label = quality_label(mae, threshold=0.15 * mean_actual)
+        max_ae_label = quality_label(max_ae, threshold=0.5 * mean_actual)
+        normalized_bic_label = quality_label(normalized_bic, threshold=5)
+        aic_label = quality_label(aic, threshold=1.5 * mean_actual)
+
         metrics = {
+            '樣本數 N': n,
             'R-squared': r2,
             'Adjusted R-squared': adj_r2,
             'Stabilized R-squared': stabilized_r2,
             'MAPE (%)': mape,
             'RMSE': rmse,
+            'RMSE 判斷': rmse_label,
             'MAE': mae,
+            'MAE 判斷': mae_label,
             'Max AE': max_ae,
+            'Max AE 判斷': max_ae_label,
             'Normalized BIC': normalized_bic,
+            'Normalized BIC 判斷': normalized_bic_label,
             'AIC': aic,
+            'AIC 判斷': aic_label,
             'Ljung-Box p-value': ljung_box_p
         }
         return metrics
 
     def plot_acf_pacf(self, train_start, train_end):
-        """
-        繪製訓練期間資料及殘差的 ACF / PACF 圖
-
-        Args:
-            train_start (datetime): 訓練起始日
-            train_end (datetime): 訓練結束日
-
-        Returns:
-            matplotlib.figure.Figure: 繪圖物件
-        """
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         train_df = self.df.loc[train_start:train_end]
         series = train_df[self.target_col].dropna()
@@ -221,15 +209,6 @@ class ForecastModel:
 
     @staticmethod
     def summarize_quality(metrics_dict):
-        """
-        根據指標簡單給出模型品質摘要
-
-        Args:
-            metrics_dict (dict): 模型績效指標字典
-
-        Returns:
-            str: 模型品質摘要訊息
-        """
         summary = []
         if metrics_dict.get('R-squared', 0) < 0.5:
             summary.append("R平方過低，建議增加訓練資料量或加入其他外生變數。")
