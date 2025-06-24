@@ -9,8 +9,8 @@ from io import BytesIO
 matplotlib.rcParams['font.family'] = 'Microsoft JhengHei'
 matplotlib.rcParams['axes.unicode_minus'] = False
 
-st.set_page_config(page_title="高雄捷運-運量預測系統", layout="wide")
-st.markdown("<h1 style='text-align: center;'>高雄捷運-運量預測系統</h1>", unsafe_allow_html=True)
+st.set_page_config(page_title="高雄捷運-運量預測系統 ver. 1", layout="wide")
+st.markdown("<h1 style='text-align: center;'>高雄捷運-運量預測系統 ver. 1</h1>", unsafe_allow_html=True)
 
 @st.cache_data
 def cached_load():
@@ -164,7 +164,9 @@ if submitted:
         df_result.to_excel(towrite, index=True)
         st.divider()
         st.download_button("📥 下載預測結果 Excel", towrite.getvalue(), file_name="forecast_result.xlsx")
-
+        
+        progress.progress(100, text="完成")
+        
         df_eval = df_result.dropna(subset=['實際值'])
         if not df_eval.empty:
             st.divider()
@@ -222,6 +224,11 @@ if submitted:
                         '說明': '檢驗殘差是否為白噪音。',
                         '判斷': lambda v: '好' if v > 0.05 else '差'
                     },
+                    'Durbin-Watson': {
+                        '標準': '約 2 為佳',
+                        '說明': 'Durbin-Watson 統計量用於檢驗殘差自相關，約等於2表示無自相關。',
+                        '判斷': lambda v: '好' if 1.5 <= v <= 2.5 else '差'
+                    },
                     '樣本數 N': {
                         '標準': '越大越穩定',
                         '說明': '評估樣本數，用於衡量訓練資料量。',
@@ -231,7 +238,7 @@ if submitted:
 
                 rows = []
                 priority_order = ['MAPE (%)', 'R-squared', 'Adjusted R-squared', 'Stabilized R-squared',
-                                  'RMSE', 'MAE', 'Max AE', 'Normalized BIC', 'AIC', 'Ljung-Box p-value', '樣本數 N']
+                                  'RMSE', 'MAE', 'Max AE', 'Normalized BIC', 'AIC', 'Ljung-Box p-value', 'Durbin-Watson', '樣本數 N']
 
                 for key in priority_order:
                     val = metrics.get(key, np.nan)
@@ -263,6 +270,7 @@ if submitted:
                 else:
                     st.success(summary_text)
 
+        # ----- 只在展開區塊內顯示預測圖 -----
         with st.expander("📈 顯示運量預測圖表"):
             fig, ax1 = plt.subplots(figsize=(12, 6))
             ax2 = ax1.twinx()
@@ -292,6 +300,41 @@ if submitted:
 
             st.pyplot(fig)
 
+        # ----- 合併 ACF/PACF 原始與殘差圖 -----
+        from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+        with st.expander("📊 顯示 ACF / PACF 分析圖（原始資料與殘差）"):
+            orig_series = df[target_col].loc[train_start_dt:train_end_dt].dropna()
+            resid_series = None
+            if hasattr(model_result, "resid"):
+                resid_series = model_result.resid.dropna()
+
+            fig_acf_pacf, axes = plt.subplots(2, 2, figsize=(14, 8))
+
+            # 原始資料 ACF
+            plot_acf(orig_series, ax=axes[0,0], lags=40)
+            axes[0,0].set_title("原始資料 ACF")
+
+            # 原始資料 PACF
+            plot_pacf(orig_series, ax=axes[0,1], lags=40, method='ywm')
+            axes[0,1].set_title("原始資料 PACF")
+
+            # 殘差 ACF
+            if resid_series is not None and len(resid_series) > 0:
+                plot_acf(resid_series, ax=axes[1,0], lags=40)
+                axes[1,0].set_title("殘差 ACF")
+            else:
+                axes[1,0].axis('off')
+
+            # 殘差 PACF
+            if resid_series is not None and len(resid_series) > 0:
+                plot_pacf(resid_series, ax=axes[1,1], lags=40, method='ywm')
+                axes[1,1].set_title("殘差 PACF")
+            else:
+                axes[1,1].axis('off')
+
+            plt.tight_layout()
+            st.pyplot(fig_acf_pacf)
         if not df_eval.empty:
             with st.expander("📊 模型統計摘要"):
                 st.code(str(model_result.summary()), language='text')
@@ -310,4 +353,4 @@ if submitted:
             st.dataframe(glossary_df, use_container_width=True)
 
     except Exception as e:
-        st.exception(e)
+        st.error(f"執行預測發生錯誤: {e}")

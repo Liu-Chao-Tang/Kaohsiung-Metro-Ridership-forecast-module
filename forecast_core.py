@@ -6,6 +6,7 @@ from statsmodels.tsa.arima.model import ARIMA
 from pmdarima import auto_arima
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.stats.stattools import durbin_watson
 import matplotlib.pyplot as plt
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 
@@ -64,7 +65,7 @@ class ForecastModel:
         elif model_type == "ARIMA":
             model = ARIMA(endog, order=order)
             self.model_fit = model.fit()
-        else:  # SARIMAX
+        else:
             model = SARIMAX(endog, order=order, seasonal_order=seasonal_order,
                             exog=exog, enforce_stationarity=False, enforce_invertibility=False)
             self.model_fit = model.fit(disp=False)
@@ -72,7 +73,7 @@ class ForecastModel:
 
     def forecast(self, forecast_start, forecast_end):
         if self.model_fit is None:
-            raise ValueError("模型尚未訓練完成")
+            raise ValueError("\u6a21\u578b\u5c1a\u672a\u8a13\u7df4\u5b8c\u6210")
 
         full_index = pd.date_range(forecast_start, forecast_end)
         steps = len(full_index)
@@ -105,7 +106,7 @@ class ForecastModel:
             lower.index = full_index
             upper.index = full_index
 
-        else:  # SARIMAX
+        else:
             pred = self.model_fit.get_forecast(steps=steps, exog=exog_forecast)
             pred_mean = pred.predicted_mean
             try:
@@ -134,6 +135,7 @@ class ForecastModel:
         mae = mean_absolute_error(actual, predicted)
         with np.errstate(divide='ignore', invalid='ignore'):
             mape = np.mean(np.abs(residuals / actual.replace(0, np.nan))) * 100
+            smape = 100 * np.mean(2 * np.abs(predicted - actual) / (np.abs(actual) + np.abs(predicted)))
         max_ae = np.max(np.abs(residuals))
         r2 = r2_score(actual, predicted)
         n = len(actual)
@@ -151,20 +153,10 @@ class ForecastModel:
         except Exception:
             ljung_box_p = np.nan
 
-        def quality_label(value, threshold, lower_is_better=True):
-            if np.isnan(value):
-                return "無法判斷"
-            if lower_is_better:
-                return "良好" if value <= threshold else "差"
-            else:
-                return "良好" if value >= threshold else "差"
-
-        mean_actual = np.mean(actual)
-        rmse_label = quality_label(rmse, threshold=0.2 * mean_actual)
-        mae_label = quality_label(mae, threshold=0.15 * mean_actual)
-        max_ae_label = quality_label(max_ae, threshold=0.5 * mean_actual)
-        normalized_bic_label = quality_label(normalized_bic, threshold=5)
-        aic_label = quality_label(aic, threshold=1.5 * mean_actual)
+        try:
+            dw_stat = durbin_watson(self.model_fit.resid.dropna())
+        except Exception:
+            dw_stat = np.nan
 
         metrics = {
             '樣本數 N': n,
@@ -172,17 +164,14 @@ class ForecastModel:
             'Adjusted R-squared': adj_r2,
             'Stabilized R-squared': stabilized_r2,
             'MAPE (%)': mape,
+            'SMAPE (%)': smape,
             'RMSE': rmse,
-            'RMSE 判斷': rmse_label,
             'MAE': mae,
-            'MAE 判斷': mae_label,
             'Max AE': max_ae,
-            'Max AE 判斷': max_ae_label,
             'Normalized BIC': normalized_bic,
-            'Normalized BIC 判斷': normalized_bic_label,
             'AIC': aic,
-            'AIC 判斷': aic_label,
-            'Ljung-Box p-value': ljung_box_p
+            'Ljung-Box p-value': ljung_box_p,
+            'Durbin-Watson': dw_stat
         }
         return metrics
 
@@ -215,7 +204,7 @@ class ForecastModel:
         if metrics_dict.get('MAPE (%)', 100) > 20:
             summary.append("MAPE過高，建議考慮目標變數轉換或加入更多外部影響因素。")
         if metrics_dict.get('Ljung-Box p-value', 0) <= 0.05:
-            summary.append("殘差自相關明顯，建議提高模型的AR或季節性階數。")
+            summary.append("殘差自相關明顯，建議提高模型的AR/季節性階數或增加外生變數。")
 
         if not summary:
             return "✅ 模型表現良好，可直接應用於實務預測。"
