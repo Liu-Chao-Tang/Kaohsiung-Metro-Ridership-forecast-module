@@ -27,18 +27,28 @@ class ForecastModel:
     def load_data(self, filepath):
         self.df = pd.read_excel(filepath, index_col=0, parse_dates=True)
 
-    def auto_fit(self, train_start, train_end, m=7, expert_mode=False):
+    def auto_fit(self, train_start, train_end, m=7, expert_mode=False, stepwise_mode=True):
         train_df = self.df.loc[train_start:train_end]
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
         seasonal = expert_mode or (m != 0)
 
+        max_p = 10
+        max_q = 10
+        max_P = 2
+        max_Q = 2
+
         stepwise_model = auto_arima(
             endog, exogenous=exog, seasonal=seasonal, m=m,
-            start_p=0, max_p=3, start_q=0, max_q=3,
-            start_P=0, max_P=2, start_Q=0, max_Q=2,
-            error_action='ignore', suppress_warnings=True, stepwise=True
+            start_p=0, max_p=max_p, start_q=0, max_q=max_q,
+            start_P=0, max_P=max_P, start_Q=0, max_Q=max_Q,
+            d=None, D=None,          # 讓auto_arima判斷差分階數
+            max_d=2, max_D=1,
+            error_action='ignore',
+            suppress_warnings=True,
+            stepwise=stepwise_mode,
+            n_jobs=1
         )
         self.order = stepwise_model.order
         self.seasonal_order = stepwise_model.seasonal_order

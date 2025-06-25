@@ -21,13 +21,14 @@ df = cached_load()
 
 all_numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
 volume_cols = [col for col in all_numeric_columns if '運量' in col]
-other_cols = [col for col in all_numeric_columns if col not in volume_cols]
-sorted_columns = volume_cols + other_cols
 
-default_target = '總運量' if '總運量' in sorted_columns else sorted_columns[0]
+default_target = '總運量' if '總運量' in volume_cols else volume_cols[0]
 
 st.header("1. 預測項目選擇")
-target_col = st.selectbox("預測項目：", sorted_columns, index=sorted_columns.index(default_target))
+target_col = st.selectbox(
+    "預測項目（僅限運量相關欄位）：",
+    volume_cols,
+    index=volume_cols.index(default_target) if default_target in volume_cols else 0)
 exog_options = [col for col in df.columns if col != target_col]
 
 last_actual_date = df[target_col].replace(0, np.nan).dropna().index.max()
@@ -39,6 +40,8 @@ mode = st.radio("", ("專家模式（自動選擇最優模型運算）", "自訂
 
 if mode == "專家模式（自動選擇最優模型運算）":
     m = 7
+    search_speed = st.radio("模型搜尋模式", ["快速（運算時間短）", "精準（準確率較高）"])
+    stepwise_mode = True if search_speed == "快速（運算時間短）" else False
 else:
     st.subheader("自訂模式：請選擇模型類型")
     model_type = st.selectbox("選擇模型：", ["AR", "MA", "ARIMA", "SARIMAX"], index=3, format_func=lambda x: {
@@ -93,6 +96,10 @@ with st.form("forecast_form"):
 if submitted:
     try:
         st.info("開始執行預測...")
+    
+        import time
+        start_time = time.time()
+
         train_start_dt = pd.to_datetime(train_start)
         train_end_dt = pd.to_datetime(train_end)
         forecast_start_dt = train_end_dt + pd.Timedelta(days=1)
@@ -107,14 +114,22 @@ if submitted:
         fm = ForecastModel(df, target_col, use_exog, selected_exog)
 
         if mode == "專家模式（自動選擇最優模型運算）":
-            order, seasonal_order = fm.auto_fit(train_start_dt, train_end_dt, m=m, expert_mode=True)
+            import time
+            t0 = time.time()
+            order, seasonal_order = fm.auto_fit(train_start_dt, train_end_dt, m=m, expert_mode=True, stepwise_mode=stepwise_mode)
+            t1 = time.time()
+            st.write(f"auto_fit() 耗時: {t1 - t0:.2f} 秒")
             model_type = "SARIMAX"
             st.success(f"自動模型參數：order={order}, seasonal_order={seasonal_order}")
         else:
             order = (p, d, q)
             seasonal_order = (P, D, Q, S)
 
-        progress.progress(30, text="訓練模型中...")
+        t1 = time.time()
+        elapsed1 = t1 - start_time
+        est_total = elapsed1 / 0.3
+        remaining = est_total - elapsed1
+        progress.progress(30, text=f"訓練模型中... ⏳ 預估剩餘 {remaining:.1f} 秒")
 
         try:
             model_result = fm.fit(train_start_dt, train_end_dt, order, seasonal_order, model_type)
@@ -122,9 +137,19 @@ if submitted:
             st.error("❌ 模型訓練失敗，請檢查參數或資料格式")
             st.stop()
 
-        progress.progress(60, text="預測中...")
+        t2 = time.time()
+        elapsed2 = t2 - start_time
+        est_total = elapsed2 / 0.6
+        remaining = est_total - elapsed2
+        progress.progress(60, text=f"預測中... ⏳ 預估剩餘 {remaining:.1f} 秒")
 
         df_forecast = fm.forecast(forecast_start_dt, forecast_end_dt)
+        
+        progress.progress(100, text="✅ 預測完成")
+        
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        st.success(f"⏱️ 預測流程共花費時間：{elapsed_time:.2f} 秒")
 
         actuals = df[target_col].reindex(df_forecast.index)
         df_result = df_forecast.copy()
@@ -164,9 +189,7 @@ if submitted:
         df_result.to_excel(towrite, index=True)
         st.divider()
         st.download_button("📥 下載預測結果 Excel", towrite.getvalue(), file_name="forecast_result.xlsx")
-        
-        progress.progress(100, text="完成")
-        
+
         df_eval = df_result.dropna(subset=['實際值'])
         if not df_eval.empty:
             st.divider()
