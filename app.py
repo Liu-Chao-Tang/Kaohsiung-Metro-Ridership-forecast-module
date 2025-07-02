@@ -93,10 +93,13 @@ with st.form("forecast_form"):
     n_forecast_days = st.slider("預測天數", min_value=1, max_value=365, value=7)
     submitted = st.form_submit_button("執行預測")
 
+# 初始化執行日誌
+if 'model_logs' not in st.session_state:
+    st.session_state['model_logs'] = []
+
 if submitted:
     try:
         st.info("開始執行預測...")
-    
         import time
         start_time = time.time()
 
@@ -114,16 +117,16 @@ if submitted:
         fm = ForecastModel(df, target_col, use_exog, selected_exog)
 
         if mode == "專家模式（自動選擇最優模型運算）":
-            import time
             t0 = time.time()
             order, seasonal_order = fm.auto_fit(train_start_dt, train_end_dt, m=m, expert_mode=True, stepwise_mode=stepwise_mode)
             t1 = time.time()
             st.write(f"auto_fit() 耗時: {t1 - t0:.2f} 秒")
-            model_type = "SARIMAX"
+            model_type_chosen = "SARIMAX"
             st.success(f"自動模型參數：order={order}, seasonal_order={seasonal_order}")
         else:
             order = (p, d, q)
             seasonal_order = (P, D, Q, S)
+            model_type_chosen = model_type
 
         t1 = time.time()
         elapsed1 = t1 - start_time
@@ -132,7 +135,7 @@ if submitted:
         progress.progress(30, text=f"訓練模型中... ⏳ 預估剩餘 {remaining:.1f} 秒")
 
         try:
-            model_result = fm.fit(train_start_dt, train_end_dt, order, seasonal_order, model_type)
+            model_result = fm.fit(train_start_dt, train_end_dt, order, seasonal_order, model_type_chosen)
         except Exception as e:
             st.error("❌ 模型訓練失敗，請檢查參數或資料格式")
             st.stop()
@@ -144,9 +147,9 @@ if submitted:
         progress.progress(60, text=f"預測中... ⏳ 預估剩餘 {remaining:.1f} 秒")
 
         df_forecast = fm.forecast(forecast_start_dt, forecast_end_dt)
-        
+
         progress.progress(100, text="✅ 預測完成")
-        
+
         end_time = time.time()
         elapsed_time = end_time - start_time
         st.success(f"⏱️ 預測流程共花費時間：{elapsed_time:.2f} 秒")
@@ -293,6 +296,7 @@ if submitted:
                 else:
                     st.success(summary_text)
 
+
         # ----- 只在展開區塊內顯示預測圖 -----
         with st.expander("📈 顯示運量預測圖表"):
             fig, ax1 = plt.subplots(figsize=(12, 6))
@@ -375,5 +379,84 @@ if submitted:
 
             st.dataframe(glossary_df, use_container_width=True)
 
+        # --- 新增模型執行日誌 ---
+        def add_model_log(
+            target_col, mode, model_type, order, seasonal_order,
+            selected_exog, use_exog, train_start_dt, train_end_dt,
+            n_forecast_days, mean_error, metrics, elapsed_time
+        ):
+            log_entry = {
+                '執行時間': pd.Timestamp.now(),
+                '目標欄位': target_col,
+                '模式': mode,
+                '模型類型': model_type,
+                '模型參數_order': order if mode == "自訂模式" else str(order),
+                '模型參數_seasonal_order': seasonal_order if mode == "自訂模式" else str(seasonal_order),
+                '外生變數': selected_exog if use_exog else [],
+                '訓練期間起': train_start_dt.strftime('%Y-%m-%d'),
+                '訓練期間迄': train_end_dt.strftime('%Y-%m-%d'),
+                '預測天數': n_forecast_days,
+                '平均預測誤差(%)': mean_error,
+                '模型績效指標': metrics,
+                '耗時秒數': elapsed_time
+            }
+            st.session_state['model_logs'].append(log_entry)
+
+        add_model_log(
+            target_col=target_col,
+            mode=mode,
+            model_type=model_type if mode == "自訂模式" else "SARIMAX",
+            order=order,
+            seasonal_order=seasonal_order,
+            selected_exog=selected_exog,
+            use_exog=use_exog,
+            train_start_dt=train_start_dt,
+            train_end_dt=train_end_dt,
+            n_forecast_days=n_forecast_days,
+            mean_error=mean_error,
+            metrics=metrics if 'metrics' in locals() else {},
+            elapsed_time=elapsed_time
+        )
+
     except Exception as e:
         st.error(f"執行預測發生錯誤: {e}")
+
+# ---- 主程式末尾：模型執行日誌顯示區塊 ----
+def format_log_for_display(log):
+    return {
+        '時間': log['執行時間'].strftime('%Y-%m-%d %H:%M:%S'),
+        '耗時秒數': round(log['耗時秒數'], 2),
+        '預測誤差(%)': round(log['平均預測誤差(%)'], 3),
+        '預測項目': log['目標欄位'],
+        '模式': log['模型類型'],
+        '模型參數(pdq/季節)': f"{log['模型參數_order']} / {log['模型參數_seasonal_order']}",
+        '外生變數': ", ".join(log['外生變數']) if log['外生變數'] else "無",
+        '訓練期間': f"{log['訓練期間起']} ~ {log['訓練期間迄']}",
+        '預測天數': log['預測天數'],
+    }
+if len(st.session_state.get('model_logs', [])) == 0:
+    st.info("目前尚無模型執行日誌。")
+else:
+    with st.expander("模型執行日誌", expanded=False):
+        df_all = pd.DataFrame([format_log_for_display(log) for log in st.session_state['model_logs']])
+        st.dataframe(df_all, use_container_width=True)
+
+        if st.button("清除所有模型執行日誌"):
+            st.session_state['model_logs'] = []
+            st.warning("已清除模型執行日誌。請重新執行預測以產生新日誌。")
+            st.stop()  # 停止執行，避免後續錯誤
+
+        def to_excel(df):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='模型執行日誌')
+            processed_data = output.getvalue()
+            return processed_data
+
+        excel_data = to_excel(df_all)
+        st.download_button(
+            label="下載模型執行日誌 Excel",
+            data=excel_data,
+            file_name="model_execution_logs.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )

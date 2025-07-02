@@ -27,29 +27,49 @@ class ForecastModel:
     def load_data(self, filepath):
         self.df = pd.read_excel(filepath, index_col=0, parse_dates=True)
 
-    def auto_fit(self, train_start, train_end, m=7, expert_mode=False, stepwise_mode=True):
+    def auto_fit(self, train_start, train_end, m=7, expert_mode=False, stepwise_mode=True, fast_pq=False):
         train_df = self.df.loc[train_start:train_end]
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
         seasonal = expert_mode or (m != 0)
 
-        max_p = 10
-        max_q = 10
-        max_P = 2
-        max_Q = 2
+        # 根據訓練資料長度調整搜尋空間
+        n = len(endog)
+        max_p = min(5, max(1, n // 10))
+        max_q = min(5, max(1, n // 10))
+        max_P = min(1, m // 2)
+        max_Q = min(1, m // 2)
+
+        if fast_pq:
+            max_p = max(1, max_p)
+            max_q = max(1, max_q)
+            max_P = max(0, max_P)
+            max_Q = max(0, max_Q)
+            stepwise_mode = True #快速模式維持階梯式搜尋
+            n_jobs = 1  # 或嘗試 -1，但實際上會被忽略
+        else:
+            stepwise_mode = False #精準模式做暴力搜尋
+            n_jobs = -1 # 使用多核心加速
 
         stepwise_model = auto_arima(
-            endog, exogenous=exog, seasonal=seasonal, m=m,
-            start_p=0, max_p=max_p, start_q=0, max_q=max_q,
-            start_P=0, max_P=max_P, start_Q=0, max_Q=max_Q,
-            d=None, D=None,          # 讓auto_arima判斷差分階數
+            endog,
+            exogenous=exog,
+            seasonal=seasonal,
+            m=m,
+            start_p=0, max_p=max_p,
+            start_q=0, max_q=max_q,
+            start_P=0, max_P=max_P,
+            start_Q=0, max_Q=max_Q,
+            d=None, D=None,
             max_d=2, max_D=1,
+            seasonal_test='ocsb',
             error_action='ignore',
             suppress_warnings=True,
             stepwise=stepwise_mode,
-            n_jobs=1
+            n_jobs=n_jobs
         )
+
         self.order = stepwise_model.order
         self.seasonal_order = stepwise_model.seasonal_order
         return self.order, self.seasonal_order
@@ -75,7 +95,7 @@ class ForecastModel:
         elif model_type == "ARIMA":
             model = ARIMA(endog, order=order)
             self.model_fit = model.fit()
-        else:
+        else:  # SARIMAX
             model = SARIMAX(endog, order=order, seasonal_order=seasonal_order,
                             exog=exog, enforce_stationarity=False, enforce_invertibility=False)
             self.model_fit = model.fit(disp=False)
@@ -83,7 +103,7 @@ class ForecastModel:
 
     def forecast(self, forecast_start, forecast_end):
         if self.model_fit is None:
-            raise ValueError("\u6a21\u578b\u5c1a\u672a\u8a13\u7df4\u5b8c\u6210")
+            raise ValueError("模型尚未訓練完成")
 
         full_index = pd.date_range(forecast_start, forecast_end)
         steps = len(full_index)
@@ -116,7 +136,7 @@ class ForecastModel:
             lower.index = full_index
             upper.index = full_index
 
-        else:
+        else:  # SARIMAX
             pred = self.model_fit.get_forecast(steps=steps, exog=exog_forecast)
             pred_mean = pred.predicted_mean
             try:
