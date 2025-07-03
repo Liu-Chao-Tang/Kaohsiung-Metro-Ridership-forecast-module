@@ -36,13 +36,34 @@ min_date = df.index.min()
 max_date = last_actual_date if pd.notnull(last_actual_date) else df.index.max()
 
 st.header("2. 預測模型選擇")
-mode = st.radio("", ("專家模式（自動選擇最優模型運算）", "自訂模式"))
+mode = st.radio("", ("自動模式", "專家模式", "自訂模式"))
 
-if mode == "專家模式（自動選擇最優模型運算）":
+if mode == "自動模式":
+    st.markdown("🔍 自動模式會根據資料特性，自動選擇穩定模型參數運算（一鍵預測），避免產生負值績效")
+    model_type_chosen = "SARIMAX"
+    p, d, q = 1, 1, 1
+    P, D, Q, S = 1, 1, 1, 7
+    m = S
+    order = (p, d, q)
+    seasonal_order = (P, D, Q, S)
+    use_exog = True
+    selected_exog = []
+    target_series = df[target_col]
+    corr_scores = df[exog_options].corrwith(target_series).abs().sort_values(ascending=False)
+    selected_exog = corr_scores[corr_scores > 0.3].head(3).index.tolist()
+    if selected_exog:
+        st.info(f"🔍 自動模式已選擇以下外生變數作為預測依據：{', '.join(selected_exog)}")
+    else:
+        st.warning("⚠️ 無相關性足夠的外生變數，自動模式將不使用外生變數。")
+        selected_exog = []
+        
+elif mode == "專家模式":
+    st.markdown("🔍 專家模式使用多模型進行運算，考量不同參數設定組合、資料趨勢特性及模式效率等，模式搜尋空間較廣")
     m = 7
     search_speed = st.radio("模型搜尋模式", ["快速（運算時間短）", "精準（準確率較高）"])
     stepwise_mode = True if search_speed == "快速（運算時間短）" else False
 else:
+    st.markdown("🔍 自訂模式可供學術型研究，進行各模式參數設定後進行求解，可依模型績效狀況進行調整")
     st.subheader("自訂模式：請選擇模型類型")
     model_type = st.selectbox("選擇模型：", ["AR", "MA", "ARIMA", "SARIMAX"], index=3, format_func=lambda x: {
         "AR": "AR (自迴歸模型)",
@@ -72,16 +93,17 @@ else:
         S = st.number_input("季節性週期 S (天)", min_value=1, value=7, step=1)
         m = S
 
-st.header("3. 影響因子選擇(外生變數)")
-use_exog = st.radio("", ("否(僅以歷史運量資料進行預測)", "是(考量其他影響因素)")) == "是(考量其他影響因素)"
-selected_exog = []
-if use_exog:
-    st.markdown("請勾選要使用的外生變數：")
-    for i, exog in enumerate(exog_options, start=1):
-        label = f"變數{i}-{exog}"
-        default_checked = any(k in exog for k in ["溫度", "降雨", "假日"])
-        if st.checkbox(label, key=exog, value=default_checked):
-            selected_exog.append(exog)
+if mode in ["專家模式", "自訂模式"]:
+    st.header("3. 影響因子選擇(外生變數)")
+    use_exog = st.radio("", ("否(僅以歷史運量資料進行預測)", "是(考量其他影響因素)")) == "是(考量其他影響因素)"
+    selected_exog = []
+    if use_exog:
+        st.markdown("請勾選要使用的外生變數：")
+        for i, exog in enumerate(exog_options, start=1):
+            label = f"變數{i}-{exog}"
+            default_checked = any(k in exog for k in ["溫度", "降雨", "假日"])
+            if st.checkbox(label, key=exog, value=default_checked):
+                selected_exog.append(exog)
 
 st.header("4. 現有運量資料範圍")
 st.markdown(f"資料日期範圍：**{min_date.date()}** 至 **{max_date.date()}**")
@@ -116,7 +138,31 @@ if submitted:
 
         fm = ForecastModel(df, target_col, use_exog, selected_exog)
 
-        if mode == "專家模式（自動選擇最優模型運算）":
+        if mode == "自動模式":
+            st.markdown("🔍 **自動模式啟動中，系統將自動尋找最佳參數...**")
+
+            # 設定季節週期 (你也可以用變數替代 7)
+            m = 7
+
+            # 呼叫自動尋參（此函式內已包含 stepwise 與 fast_pq）
+            order, seasonal_order = fm.auto_fit(
+                train_start_dt,
+                train_end_dt,
+                m=m,
+                expert_mode=True,
+                stepwise_mode=True,
+                fast_pq=True
+            )
+            model_type_chosen = "SARIMAX"
+
+            st.write(f"自動模式最佳參數：order={order}, seasonal_order={seasonal_order}")
+
+            # 訓練模型
+            model_result = fm.fit(train_start_dt, train_end_dt, order, seasonal_order, model_type_chosen)
+
+            # 做預測
+            df_forecast = fm.forecast(forecast_start_dt, forecast_end_dt) 
+        elif mode == "專家模式":
             t0 = time.time()
             order, seasonal_order = fm.auto_fit(train_start_dt, train_end_dt, m=m, expert_mode=True, stepwise_mode=stepwise_mode)
             t1 = time.time()
@@ -460,3 +506,86 @@ else:
             file_name="model_execution_logs.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.lib.styles import getSampleStyleSheet
+import tempfile
+from io import BytesIO
+import streamlit as st
+
+def generate_pdf_report(df_result, target_col, mode, model_type_chosen,
+                        order, seasonal_order, selected_exog, metrics,
+                        fig, fig_acf_pacf, train_start_dt, train_end_dt,
+                        forecast_start_dt, forecast_end_dt):
+
+    tmp_pdf = BytesIO()
+    doc = SimpleDocTemplate(tmp_pdf, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph("高雄捷運 - 模型預測報告", styles['Title']))
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(f"<b>預測項目：</b> {target_col}", styles['Normal']))
+    elements.append(Paragraph(f"<b>預測模式：</b> {mode}", styles['Normal']))
+    elements.append(Paragraph(f"<b>模型類型：</b> {model_type_chosen}", styles['Normal']))
+    elements.append(Paragraph(f"<b>模型參數：</b> order={order}, seasonal_order={seasonal_order}", styles['Normal']))
+    elements.append(Paragraph(f"<b>外生變數：</b> {', '.join(selected_exog) if selected_exog else '無'}", styles['Normal']))
+    elements.append(Paragraph(f"<b>訓練期間：</b> {train_start_dt.date()} ~ {train_end_dt.date()}", styles['Normal']))
+    elements.append(Paragraph(f"<b>預測期間：</b> {forecast_start_dt.date()} ~ {forecast_end_dt.date()}", styles['Normal']))
+    elements.append(Spacer(1, 12))
+
+    if metrics:
+        elements.append(Paragraph("<b>模型績效指標：</b>", styles['Heading3']))
+        for k, v in metrics.items():
+            elements.append(Paragraph(f"{k}: {round(v, 4) if isinstance(v, float) else v}", styles['Normal']))
+        elements.append(Spacer(1, 12))
+
+    def save_fig_temp(fig):
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
+            fig.savefig(tmp_img.name, bbox_inches='tight')
+            return tmp_img.name
+
+    img1_path = save_fig_temp(fig)
+    img2_path = save_fig_temp(fig_acf_pacf)
+
+    elements.append(Paragraph("<b>預測圖：</b>", styles['Heading3']))
+    elements.append(RLImage(img1_path, width=500, height=300))
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph("<b>ACF / PACF 分析圖：</b>", styles['Heading3']))
+    elements.append(RLImage(img2_path, width=500, height=300))
+    elements.append(Spacer(1, 12))
+
+    doc.build(elements)
+    tmp_pdf.seek(0)
+    return tmp_pdf
+
+# 確保以下程式碼只在預測成功，變數都有定義的情況下執行
+if 'df_result' in locals() and df_result is not None:
+    st.divider()
+    st.subheader("📄 產生 PDF 模型報告")
+
+    pdf_buffer = generate_pdf_report(
+        df_result=df_result,
+        target_col=target_col,
+        mode=mode,
+        model_type_chosen=model_type_chosen,
+        order=order,
+        seasonal_order=seasonal_order,
+        selected_exog=selected_exog,
+        metrics=metrics if 'metrics' in locals() else {},
+        fig=fig,
+        fig_acf_pacf=fig_acf_pacf,
+        train_start_dt=train_start_dt,
+        train_end_dt=train_end_dt,
+        forecast_start_dt=forecast_start_dt,
+        forecast_end_dt=forecast_end_dt
+    )
+
+    st.download_button(
+        label="📥 下載 PDF 預測報告",
+        data=pdf_buffer,
+        file_name="捷運運量預測報告.pdf",
+        mime="application/pdf"
+    )
+else:
+    st.info("請先執行預測，產生預測結果後才能下載報告。")

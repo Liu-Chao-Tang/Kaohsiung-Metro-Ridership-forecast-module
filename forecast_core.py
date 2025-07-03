@@ -32,9 +32,13 @@ class ForecastModel:
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
+        print(f"[auto_fit] 使用外生變數: {self.exog_cols}")
+        print(f"[auto_fit] exog shape: {exog.shape if exog is not None else 'None'}")
+        if exog is not None and exog.isnull().any().any():
+            print("[auto_fit] ⚠️ 外生變數中有缺失值！請檢查資料完整性。")
+
         seasonal = expert_mode or (m != 0)
 
-        # 根據訓練資料長度調整搜尋空間
         n = len(endog)
         max_p = min(5, max(1, n // 10))
         max_q = min(5, max(1, n // 10))
@@ -46,11 +50,11 @@ class ForecastModel:
             max_q = max(1, max_q)
             max_P = max(0, max_P)
             max_Q = max(0, max_Q)
-            stepwise_mode = True #快速模式維持階梯式搜尋
-            n_jobs = 1  # 或嘗試 -1，但實際上會被忽略
+            stepwise_mode = True
+            n_jobs = 1
         else:
-            stepwise_mode = False #精準模式做暴力搜尋
-            n_jobs = -1 # 使用多核心加速
+            stepwise_mode = False
+            n_jobs = -1
 
         stepwise_model = auto_arima(
             endog,
@@ -72,7 +76,20 @@ class ForecastModel:
 
         self.order = stepwise_model.order
         self.seasonal_order = stepwise_model.seasonal_order
+        print(f"[auto_fit] 自動選擇參數 order: {self.order}, seasonal_order: {self.seasonal_order}")
         return self.order, self.seasonal_order
+
+    def select_top_exog_by_correlation(self, train_start, train_end, top_k=3, corr_threshold=0.1):
+        train_df = self.df.loc[train_start:train_end]
+        corrs = {}
+        for exog in self.exog_cols:
+            if exog in train_df.columns:
+                corr = train_df[self.target_col].corr(train_df[exog])
+                if abs(corr) >= corr_threshold:
+                    corrs[exog] = abs(corr)
+        selected = sorted(corrs, key=corrs.get, reverse=True)[:top_k]
+        print(f"[select_top_exog_by_correlation] 選出外生變數: {selected}")
+        return selected
 
     def fit(self, train_start, train_end, order, seasonal_order, model_type="SARIMAX"):
         self.train_start_date = train_start
@@ -81,6 +98,11 @@ class ForecastModel:
         train_df = self.df.loc[train_start:train_end]
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
+
+        print(f"[fit] 使用外生變數: {self.exog_cols}")
+        print(f"[fit] exog shape: {exog.shape if exog is not None else 'None'}")
+        if exog is not None and exog.isnull().any().any():
+            print("[fit] ⚠️ 外生變數中有缺失值！")
 
         self.order = order
         self.seasonal_order = seasonal_order
@@ -99,6 +121,7 @@ class ForecastModel:
             model = SARIMAX(endog, order=order, seasonal_order=seasonal_order,
                             exog=exog, enforce_stationarity=False, enforce_invertibility=False)
             self.model_fit = model.fit(disp=False)
+        print(f"[fit] 模型訓練完成")
         return self.model_fit
 
     def forecast(self, forecast_start, forecast_end):
@@ -111,6 +134,11 @@ class ForecastModel:
         exog_forecast = None
         if self.use_exog and self.exog_cols:
             exog_forecast = self.df[self.exog_cols].reindex(full_index)
+            print(f"[forecast] 使用外生變數: {self.exog_cols}")
+            print(f"[forecast] exog_forecast shape: {exog_forecast.shape}")
+            if exog_forecast.isnull().any().any():
+                print("[forecast] ⚠️ 外生變數預測期間含缺失值，將以前後填補方式補值")
+                exog_forecast = exog_forecast.fillna(method='ffill').fillna(method='bfill')
 
         if self.model_type == "AR":
             start = len(self.model_fit.model.endog)
@@ -157,6 +185,7 @@ class ForecastModel:
             '上限': upper
         }, index=full_index)
 
+        print(f"[forecast] 預測完成")
         return df_forecast
 
     def calculate_metrics(self, actual, predicted):
@@ -225,6 +254,49 @@ class ForecastModel:
                 axes[1, 1].set_visible(False)
         plt.tight_layout()
         return fig
+
+    def run_auto_mode_forecast(self, train_start, train_end, forecast_start, forecast_end, m=7):
+        # 1. 自動選外生變數
+        selected_exog = self.select_top_exog_by_correlation(train_start, train_end)
+        self.exog_cols = selected_exog
+        self.use_exog = len(selected_exog) > 0
+
+        # 2. 自動尋找最佳模型參數 (SARIMAX)
+        order, seasonal_order = self.auto_fit(train_start, train_end, m=m, expert_mode=True, stepwise_mode=True)
+
+        # 3. 訓練模型
+        model_fit = self.fit(train_start, train_end, order, seasonal_order, model_type="SARIMAX")
+
+        # 4. 預測
+        df_forecast = self.forecast(forecast_start, forecast_end)
+
+        # 5. 計算績效指標
+        actuals = self.df[self.target_col].reindex(df_forecast.index)
+        actuals = actuals.dropna()
+        df_forecast = df_forecast.loc[actuals.index]
+
+        metrics = self.calculate_metrics(actuals, df_forecast['預測值'])
+
+        # 6. 負值指標標註 (R2、AdjR2、StabR2)
+        for key in ['R-squared', 'Adjusted R-squared', 'Stabilized R-squared']:
+            if metrics.get(key, 0) < 0:
+                metrics[key] = f"{metrics[key]} (不適用)"
+
+        # 儲存當前模型狀態（可視需要）
+        self.order = order
+        self.seasonal_order = seasonal_order
+        self.model_fit = model_fit
+
+        print(f"[run_auto_mode_forecast] 完成，績效指標: {metrics}")
+        return {
+            'order': order,
+            'seasonal_order': seasonal_order,
+            'model_fit': model_fit,
+            'df_forecast': df_forecast,
+            'metrics': metrics,
+            'selected_exog': selected_exog,
+            'use_exog': self.use_exog
+        }
 
     @staticmethod
     def summarize_quality(metrics_dict):
