@@ -99,6 +99,23 @@ class ForecastModel:
         endog = train_df[self.target_col]
         exog = train_df[self.exog_cols] if self.use_exog and self.exog_cols else None
 
+        if self.use_exog and self.exog_cols:
+            # 檢查並移除 VIF > 5 的變數
+            keep_vars, excluded_vars = self.calculate_vif(train_df, self.exog_cols, threshold=5.0)
+
+            if not keep_vars:
+                print("[fit] ⚠️ 所有外生變數 VIF 過高（>5），將不使用外生變數")
+                self.use_exog = False
+                self.exog_cols = []
+                exog = None
+            else:
+                print(f"[fit] ✅ 通過 VIF 檢查的外生變數：{keep_vars}")
+                if excluded_vars:
+                    excl_text = ", ".join([f"{v[0]} (VIF={v[1]:.2f})" for v in excluded_vars])
+                    print(f"[fit] ⚠️ 排除共線性過高變數：{excl_text}")
+                self.exog_cols = keep_vars
+                exog = train_df[keep_vars]
+
         print(f"[fit] 使用外生變數: {self.exog_cols}")
         print(f"[fit] exog shape: {exog.shape if exog is not None else 'None'}")
         if exog is not None and exog.isnull().any().any():
@@ -136,9 +153,21 @@ class ForecastModel:
             exog_forecast = self.df[self.exog_cols].reindex(full_index)
             print(f"[forecast] 使用外生變數: {self.exog_cols}")
             print(f"[forecast] exog_forecast shape: {exog_forecast.shape}")
+
+            # 檢查並處理 NaN
             if exog_forecast.isnull().any().any():
-                print("[forecast] ⚠️ 外生變數預測期間含缺失值，將以前後填補方式補值")
+                print("[forecast] ⚠️ 外生變數預測期間含缺值，將以 forward/backward 填補")
                 exog_forecast = exog_forecast.fillna(method='ffill').fillna(method='bfill')
+
+            # 檢查並處理 inf
+            if np.isinf(exog_forecast.values).any():
+                print("[forecast] ⚠️ 外生變數含 inf，將轉為 NaN 並補值")
+                exog_forecast = exog_forecast.replace([np.inf, -np.inf], np.nan)
+                exog_forecast = exog_forecast.fillna(method='ffill').fillna(method='bfill')
+
+            # 最後確認處理後仍含缺值時拋出例外
+            if exog_forecast.isnull().any().any():
+                raise ValueError("[forecast] ❌ 補值後的 exog 預測資料仍含缺值，請檢查資料完整性！")
 
         if self.model_type == "AR":
             start = len(self.model_fit.model.endog)
@@ -297,6 +326,20 @@ class ForecastModel:
             'selected_exog': selected_exog,
             'use_exog': self.use_exog
         }
+    def calculate_vif(self, df_subset, exog_cols, threshold=5.0):
+        from statsmodels.tools.tools import add_constant
+        from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+        X = df_subset[exog_cols].copy()
+        X = add_constant(X)
+        vif_data = pd.DataFrame()
+        vif_data["變數"] = X.columns
+        vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+        vif_data = vif_data[vif_data["變數"] != "const"]
+
+        keep_vars = vif_data[vif_data["VIF"] <= threshold]["變數"].tolist()
+        excluded_vars = vif_data[vif_data["VIF"] > threshold][["變數", "VIF"]].values.tolist()
+        return keep_vars, excluded_vars
 
     @staticmethod
     def summarize_quality(metrics_dict):

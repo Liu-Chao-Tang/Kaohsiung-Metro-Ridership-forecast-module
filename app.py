@@ -49,13 +49,31 @@ if mode == "自動模式":
     use_exog = True
     selected_exog = []
     target_series = df[target_col]
-    corr_scores = df[exog_options].corrwith(target_series).abs().sort_values(ascending=False)
-    selected_exog = corr_scores[corr_scores > 0.3].head(3).index.tolist()
+    corr_scores = df[exog_options].corrwith(target_series)
+
+    # 過濾條件：排除與目標變數高度重合者
+    excluded_exog = []
+    filtered_corrs = {}
+    for exog, corr in corr_scores.items():
+        if abs(corr) > 0.95 or target_col[:2] in exog[:2]:  # 名稱高度相似或相關性極高
+            excluded_exog.append((exog, corr))
+        elif abs(corr) >= 0.3:
+            filtered_corrs[exog] = abs(corr)
+
+    # 依照皮爾森值排序後選前3名
+    selected_exog = sorted(filtered_corrs, key=filtered_corrs.get, reverse=True)[:3]
+
+    # UI 呈現說明
     if selected_exog:
         st.info(f"🔍 自動模式已選擇以下外生變數作為預測依據：{', '.join(selected_exog)}")
     else:
         st.warning("⚠️ 無相關性足夠的外生變數，自動模式將不使用外生變數。")
-        selected_exog = []
+
+    # 額外提示：若有被排除的項目
+    if excluded_exog:
+        excluded_text = ", ".join([f"{e[0]} (r={e[1]:.2f})" for e in excluded_exog])
+        st.warning(f"⚠️ 以下變數與預測目標高度相關，為避免過度重合已排除：{excluded_text}")
+
         
 elif mode == "專家模式":
     st.markdown("🔍 專家模式使用多模型進行運算，考量不同參數設定組合、資料趨勢特性及模式效率等，模式搜尋空間較廣")
