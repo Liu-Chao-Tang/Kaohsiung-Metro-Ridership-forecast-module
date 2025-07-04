@@ -229,6 +229,7 @@ if submitted:
           .applymap(color_error, subset=['預測誤差(%)'])
 
         st.dataframe(styled_df, use_container_width=True)
+        st.caption("🔍 預測上下限區間表示模型的 95% 信賴區間，代表預測值有 95% 的機會落在此區間內。")
         st.markdown(f"<h4>📊 平均預測誤差(%)：{mean_error:.2f}%</h4>", unsafe_allow_html=True)
 
         if mean_error >= 10:
@@ -418,9 +419,23 @@ if submitted:
                 ["MA,Moving Average", "移動平均模型", "Moving Average Model: 利用過去誤差項的線性組合來預測。"],
                 ["ARIMA,Autoregressive Integrated Moving Average", "整合移動平均自迴歸模型", "Autoregressive Integrated Moving Average Model: 包含差分處理以讓資料平穩。"],
                 ["SARIMAX,Seasonal ARIMA with Exogenous Variables", "季節性ARIMA外生變數模型", "在ARIMA基礎上加上季節性成分與外生變數。"],
+                ["ACF,Autocorrelation Function", "自相關函數", "衡量時間序列當前值與過去值的相關性，通常用於檢查資料是否具有週期性或趨勢。"],
+                ["PACF,Partial Autocorrelation Function", "偏自相關函數", "在控制中間時期影響後，衡量當前值與某過去時間點之間的相關性。"],
+                ["MAE,Mean Absolute Error", "平均絕對誤差", "預測值與實際值差的絕對值之平均，數值越小表示誤差越小。"],
+                ["MAX AE,Maximum Absolute Error", "最大絕對誤差", "所有預測誤差中絕對值最大的值，反映預測最不準的情況。"],
                 ["MAPE", "平均絕對百分比誤差", "衡量預測值與實際值之間的平均百分比誤差。"],
                 ["R-squared", "決定係數", "衡量模型解釋變異程度的指標，介於0到1之間。"],
-                ["RMSE", "均方根誤差", "誤差平方的平均後再開根號，表示平均預測誤差。"]
+                ["RMSE", "均方根誤差", "誤差平方的平均後再開根號，表示平均預測誤差。"],
+                ["Ljung-Box Q,Ljung-Box Q Statistic", "Ljung-Box Q 統計量", "用於檢驗時間序列殘差是否具有自相關性，p 值 > 0.05 為理想。"],
+                ["VIF,Variance Inflation Factor", "變異數膨脹因子", "衡量共線性程度，值越大表示變數間重複資訊越多，通常 VIF > 5 需注意。"],
+                ["p,AR Order", "自迴歸階數 p", "AR 模型中使用的滯後項數量，代表使用幾個過去值預測未來。"],
+                ["d,Differencing Order", "差分階數 d", "ARIMA 模型中進行幾階差分以讓資料平穩。"],
+                ["q,MA Order", "移動平均階數 q", "MA 模型中使用的誤差滯後項數量，用於捕捉殘差結構。"],
+                ["P,Seasonal AR Order", "季節性自迴歸階數 P", "季節性成分的自迴歸階數，通常搭配季節週期一起使用。"],
+                ["D,Seasonal Differencing Order", "季節性差分階數 D", "季節性差分次數，使季節週期趨勢消除。"],
+                ["Q,Seasonal MA Order", "季節性移動平均階數 Q", "對季節週期誤差項做平滑的次數。"],
+                ["DW,Durbin-Watson", "Durbin-Watson 統計量", "用於檢驗殘差自相關程度，理想值約為 2，表示無自相關。"],
+                ["PI,Prediction Interval", "預測區間", "預測區間（Prediction Interval）表示模型對未來觀測值的不確定性估計，常用 95% 區間顯示預測值上下限。"]
             ], columns=["英文縮寫", "中文名稱", "定義說明"])
 
             st.dataframe(glossary_df, use_container_width=True)
@@ -444,6 +459,8 @@ if submitted:
                 '預測天數': n_forecast_days,
                 '平均預測誤差(%)': mean_error,
                 '模型績效指標': metrics,
+                'R2': metrics.get("R-squared", np.nan),
+                'Stabilized R2': metrics.get("Stabilized R-squared", np.nan),
                 '耗時秒數': elapsed_time
             }
             st.session_state['model_logs'].append(log_entry)
@@ -473,6 +490,8 @@ def format_log_for_display(log):
         '時間': log['執行時間'].strftime('%Y-%m-%d %H:%M:%S'),
         '耗時秒數': round(log['耗時秒數'], 2),
         '預測誤差(%)': round(log['平均預測誤差(%)'], 3),
+        'R²': round(log.get('R2', np.nan), 4) if not pd.isna(log.get('R2')) else '',
+        '穩定R²': round(log.get('Stabilized R2', np.nan), 4) if not pd.isna(log.get('Stabilized R2')) else '',
         '預測項目': log['目標欄位'],
         '模式': log['模型類型'],
         '模型參數(pdq/季節)': f"{log['模型參數_order']} / {log['模型參數_seasonal_order']}",
@@ -512,18 +531,34 @@ from reportlab.lib.styles import getSampleStyleSheet
 import tempfile
 from io import BytesIO
 import streamlit as st
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.fonts import addMapping
+import os
+
+# 註冊微軟正黑體，改用 ttf，確保你有 fonts/msjh.ttf
+font_path = 'fonts/msjh.ttc'
+if os.path.exists(font_path):
+    pdfmetrics.registerFont(TTFont('JhengHei', font_path))
+    addMapping('JhengHei', 0, 0, 'JhengHei')
+else:
+    raise FileNotFoundError("❌ 字體檔案 fonts/msjh.ttf 不存在，請確認已放置正確路徑")
 
 def generate_pdf_report(df_result, target_col, mode, model_type_chosen,
                         order, seasonal_order, selected_exog, metrics,
                         fig, fig_acf_pacf, train_start_dt, train_end_dt,
                         forecast_start_dt, forecast_end_dt):
 
+    styles = getSampleStyleSheet()  # 只呼叫一次
+    styles['Normal'].fontName = 'JhengHei'  # 設定字體
+    styles['Title'].fontName = 'JhengHei'
+    styles['Heading3'].fontName = 'JhengHei'
+
     tmp_pdf = BytesIO()
     doc = SimpleDocTemplate(tmp_pdf, pagesize=A4)
-    styles = getSampleStyleSheet()
     elements = []
 
-    elements.append(Paragraph("高雄捷運 - 模型預測報告", styles['Title']))
+    elements.append(Paragraph("高雄捷運 - 運量預測模型報告", styles['Title']))
     elements.append(Spacer(1, 12))
     elements.append(Paragraph(f"<b>預測項目：</b> {target_col}", styles['Normal']))
     elements.append(Paragraph(f"<b>預測模式：</b> {mode}", styles['Normal']))
